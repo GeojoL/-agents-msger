@@ -5,16 +5,6 @@
 **A shared line for AI agents — connect context, talk to each other, and reach
 whoever owns a project. Across machines, across networks.**
 
-Your AI coding agents run in many terminals, on many machines, often on
-different networks. `agents-msger` lets any of them pass context to another,
-hold a back-and-forth, and address the specific agent that is responsible for a
-given project — by name, wherever that agent happens to be running. You stand up
-**one hub** (self-hosted); any agent that can reach it joins the line — over a
-LAN, over a VPN/overlay such as Tailscale, or over the internet. The transport
-does not matter, only that the agent can connect to your hub. Exposed as MCP
-tools; every message carries the sender's identity, so the recipient knows
-exactly who to answer.
-
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#requirements)
 [![python deps](https://img.shields.io/badge/python%20deps-none%20(stdlib)-brightgreen.svg)](#requirements)
@@ -67,21 +57,20 @@ orchestration**: an orchestrator agent can discover who is live (`relay_who`),
 delegate a task to the agent that owns a given project, collect the reply, and
 coordinate work across machines — all through three tools, no bespoke plumbing.
 
-## See it in action
+**Two real Claude Code agents, talking.** One agent hands a task to the agent
+responsible for it on another machine; that agent receives it as a
+`Message from @…` turn, acts, and replies through the relay — the round-trip
+confirmed on both sides:
 
-Start the hub, start a shim, and ask the hub who is reachable:
+![A real two-agent conversation over agents-msger](docs/demo-conversation.svg)
+
+Under the hood, you just start the hub and a shim, and ask who is reachable:
 
 ![Running the hub and shim, then relay_who](docs/demo-run.svg)
 
-Then, from a machine on a different network, address the agent responsible for a
-project. The second panel is the exact message `agents-msger` hands to Claude
-Code's socket on the target — the sender's identity (`from-name` = `persona@host`,
-`from-window`, `from-pid`) travels with it:
-
-![Reaching the responsible agent across networks](docs/demo-send.svg)
-
-> Both panels are real output captured from an isolated end-to-end run
-> (hub + shim + delivery), with placeholder names and machines.
+> Both are real output — the conversation is a live two-session round-trip
+> captured from Claude Code, the commands are a real isolated run. Names and
+> machines are placeholders.
 
 ## Supported agents
 
@@ -143,9 +132,10 @@ on `machine-b`:
    opened** for that session — in Claude Code's own native payload format. The
    shim does not create sockets or implement messaging; it hands Claude Code's
    own mechanism a message that happens to have come from another machine.
-6. **Arrival.** Claude Code delivers the message into the owner's session on its
-   next turn, carrying the sender's identity (`from-name` = `persona@host`, plus
-   `from-window` and `from-pid`).
+6. **Arrival.** On its next turn, Claude Code surfaces the message in the owner's
+   session as a `Message from @<sender>` turn, carrying the sender's identity
+   (`from-name`, plus `from-window` and `from-pid`), so the owner knows exactly
+   who and where it came from.
 7. **Replying.** There is no magic reverse channel: because the message says
    exactly who and where it came from, the owner replies the same way — by
    addressing the original sender back (`relay_send(to="alice@laptop", …)`, or
