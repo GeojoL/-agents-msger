@@ -12,7 +12,8 @@ given project — by name, wherever that agent happens to be running. You stand 
 **one hub** (self-hosted); any agent that can reach it joins the line — over a
 LAN, over a VPN/overlay such as Tailscale, or over the internet. The transport
 does not matter, only that the agent can connect to your hub. Exposed as MCP
-tools; replies route back automatically.
+tools; every message carries the sender's identity, so the recipient knows
+exactly who to answer.
 
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#requirements)
@@ -47,9 +48,10 @@ Three things, nothing more:
 - **🔗 Connect context.** Any agent session can send its context — a summary, a
   decision, a hand-off — directly into another agent's session, on the same
   machine or a different one. The receiving agent picks it up on its next turn.
-- **💬 Communicate.** Messages are a real back-and-forth: when the other agent
-  replies, the reply routes automatically back to the window that asked. No
-  manual plumbing, no guessing where the answer went.
+- **💬 Communicate.** Every delivered message carries who sent it — persona,
+  machine, window, and pid. So a back-and-forth is natural: the recipient knows
+  exactly which agent (and which session) to answer, and replies by addressing
+  that sender back.
 - **🎯 Reach the responsible agent.** Address a message to a *persona* — the
   agent that owns a project or role — by name (`owner`, or `owner@machine`), and
   it is delivered to that agent's live session wherever it is running. If that
@@ -71,16 +73,15 @@ Start the hub, start a shim, and ask the hub who is reachable:
 
 ![Running the hub and shim, then relay_who](docs/demo-run.svg)
 
-Then, from a machine on a different network, hand context to the agent
-responsible for a project — and see how Claude Code surfaces it in that agent's
-session, as a `Message from @…` turn, with the sender's identity attached
-automatically:
+Then, from a machine on a different network, address the agent responsible for a
+project. The second panel is the exact message `agents-msger` hands to Claude
+Code's socket on the target — the sender's identity (`from-name` = `persona@host`,
+`from-window`, `from-pid`) travels with it:
 
-![Reaching the responsible agent across networks, as Claude Code shows it](docs/demo-send.svg)
+![Reaching the responsible agent across networks](docs/demo-send.svg)
 
-> These come from a real end-to-end run (hub + shim + delivery) captured in an
-> isolated test, with placeholder names and machines. The second panel is how
-> Claude Code renders a received cross-session message.
+> Both panels are real output captured from an isolated end-to-end run
+> (hub + shim + delivery), with placeholder names and machines.
 
 ## Supported agents
 
@@ -142,10 +143,13 @@ on `machine-b`:
    opened** for that session — in Claude Code's own native payload format. The
    shim does not create sockets or implement messaging; it hands Claude Code's
    own mechanism a message that happens to have come from another machine.
-6. **Arrival.** Claude Code renders it in the owner's session on its next turn as
-   a `Message from @<sender>` line, showing exactly who sent it.
-7. **Reply routing.** When the owner replies, the same path runs in reverse, and
-   the answer lands back in agent A's window — automatically.
+6. **Arrival.** Claude Code delivers the message into the owner's session on its
+   next turn, carrying the sender's identity (`from-name` = `persona@host`, plus
+   `from-window` and `from-pid`).
+7. **Replying.** There is no magic reverse channel: because the message says
+   exactly who and where it came from, the owner replies the same way — by
+   addressing the original sender back (`relay_send(to="alice@laptop", …)`, or
+   `#<pid>` to hit that exact session).
 
 Two liveness signals keep this honest: `relay_status()` distinguishes "that
 agent's machine is down" from "wrong address", and a session whose process is
@@ -228,7 +232,7 @@ claude mcp add agents-msger -- python3 /absolute/path/to/shim.py mcp
 
 | Tool | What it does |
 |---|---|
-| `relay_send(to, message, from_name?)` | Send to `owner` / `owner@machine` / `owner@machine#session`. Replies route back. |
+| `relay_send(to, message, from_name?)` | Send to `owner` / `owner@machine` / `owner@machine#session`. Fails loud if the target has no live session. The sender's identity is attached automatically. |
 | `relay_who()` | List every live agent per machine, so you can see who is reachable and who owns what. |
 | `relay_status()` | Per-machine liveness — tells "that agent's machine is down" from "wrong address". |
 

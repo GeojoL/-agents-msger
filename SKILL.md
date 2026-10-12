@@ -36,8 +36,10 @@ its own live sessions. You only call the tools.
    - `alive:false` = the other shim is not running (a service problem).
    - `alive:true` but the target persona is not in `relay_who()` = wrong address
      or that session is not open.
-4. Replies route automatically: when the other side replies, the message comes
-   back to your window — you do not have to find a route.
+4. Every message you receive carries who sent it (`from-name` = `persona@host`,
+   plus their window and pid). To reply, address that sender back with
+   `relay_send` — there is no automatic reverse channel; you reply the same way
+   you were reached.
 
 ## Don't
 
