@@ -48,29 +48,24 @@ Three things, nothing more:
   owner has several sessions, you can target one precisely. This makes "ask
   whoever is responsible for X" a first-class, routable action.
 
-The sender only says *who to reach*. Which machine, window, and process the
-message came from is attached automatically, so the receiver always knows who is
-talking to it — independent of the message content.
+This makes `agents-msger` a substrate for **multi-agent orchestration**: an
+orchestrator agent discovers who is live with `relay_who`, delegates to the agent
+that owns a project, and collects the reply — across machines, through three
+tools.
 
-Together these make `agents-msger` a substrate for **multi-agent
-orchestration**: an orchestrator agent can discover who is live (`relay_who`),
-delegate a task to the agent that owns a given project, collect the reply, and
-coordinate work across machines — all through three tools, no bespoke plumbing.
+## See it in action
 
-**Two real Claude Code agents, talking.** One agent hands a task to the agent
-responsible for it on another machine; that agent receives it as a
-`Message from @…` turn, acts, and replies through the relay — the round-trip
-confirmed on both sides:
+One agent hands a task to the agent responsible for it on another machine; that
+agent receives it as a `Message from @…` turn, acts, and replies through the
+relay:
 
-![A real two-agent conversation over agents-msger](docs/demo-conversation.svg)
+![A two-agent conversation over agents-msger](docs/demo-conversation.svg)
 
-Under the hood, you just start the hub and a shim, and ask who is reachable:
+Starting the hub and a shim, and listing who is reachable:
 
 ![Running the hub and shim, then relay_who](docs/demo-run.svg)
 
-> Both are real output — the conversation is a live two-session round-trip
-> captured from Claude Code, the commands are a real isolated run. Names and
-> machines are placeholders.
+<sub>Names and machines are placeholders.</sub>
 
 ## Supported agents
 
@@ -128,10 +123,8 @@ on `machine-b`:
 5. **Long-poll delivery.** `machine-b`'s shim is holding an open long-poll to the
    hub; the queued message returns immediately. The shim resolves that owner's
    socket **locally** (it never trusts a socket path from the network) and writes
-   a Claude Code cross-session message into **the socket Claude Code itself
-   opened** for that session — in Claude Code's own native payload format. The
-   shim does not create sockets or implement messaging; it hands Claude Code's
-   own mechanism a message that happens to have come from another machine.
+   the message, in Claude Code's own native format, into the socket Claude Code
+   opened for that session.
 6. **Arrival.** On its next turn, Claude Code surfaces the message in the owner's
    session as a `Message from @<sender>` turn, carrying the sender's identity
    (`from-name`, plus `from-window` and `from-pid`), so the owner knows exactly
@@ -145,10 +138,6 @@ Two liveness signals keep this honest: `relay_status()` distinguishes "that
 agent's machine is down" from "wrong address", and a session whose process is
 alive but whose socket went missing (e.g. just after a reboot) is surfaced
 explicitly rather than silently dropped.
-
-The hub and shim add **no third-party Python dependencies** (standard library
-only) and are intentionally small — a hub, a shim, and an installer. Their one
-real dependency is **Claude Code itself** (see [Requirements](#requirements)).
 
 ## Requirements
 
