@@ -33,8 +33,6 @@ reach the hub.
 
 ## What it does
 
-Three things, nothing more:
-
 - **🔗 Connect context.** Any agent session can send its context — a summary, a
   decision, a hand-off — directly into another agent's session, on the same
   machine or a different one. The receiving agent picks it up on its next turn.
@@ -44,9 +42,16 @@ Three things, nothing more:
   that sender back.
 - **🎯 Reach the responsible agent.** Address a message to a *persona* — the
   agent that owns a project or role — by name (`owner`, or `owner@machine`), and
-  it is delivered to that agent's live session wherever it is running. If that
-  owner has several sessions, you can target one precisely. This makes "ask
-  whoever is responsible for X" a first-class, routable action.
+  it is delivered to that agent's live session wherever it is running. "Ask
+  whoever is responsible for X" becomes a first-class, routable action.
+- **🧭 Never lose the right session.** Agents routinely fail to find each other:
+  a persona isn't one session — the same agent may be open in several tmux panes
+  or windows, or on several machines, and name-based addressing picks the wrong
+  one or none. `agents-msger` keys every session by its **unique pid**, so a name
+  is only a soft label that never collapses two sessions together. You always
+  reach the exact session you mean (`owner@machine#<pid>`), several panes of the
+  same persona are each addressable, and a dead or stale session never shadows
+  the live agent.
 
 This makes `agents-msger` a substrate for **multi-agent orchestration**: an
 orchestrator agent discovers who is live with `relay_who`, delegates to the agent
