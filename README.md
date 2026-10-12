@@ -16,7 +16,8 @@ tools; replies route back automatically.
 
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#requirements)
-[![dependencies](https://img.shields.io/badge/dependencies-stdlib--only-brightgreen.svg)](#requirements)
+[![python deps](https://img.shields.io/badge/python%20deps-none%20(stdlib)-brightgreen.svg)](#requirements)
+[![requires](https://img.shields.io/badge/requires-Claude%20Code-blueviolet.svg)](#requirements)
 [![status](https://img.shields.io/badge/status-early%20preview-orange.svg)](#project-status)
 [![agents](https://img.shields.io/badge/agents-Claude%20Code-blueviolet.svg)](#supported-agents)
 
@@ -26,14 +27,18 @@ tools; replies route back automatically.
 
 ## The problem
 
-Every AI agent session is an island. An agent working in one window has no way
-to hand its context to an agent in another, no way to ask a question and get an
-answer back, and no way to reach *the* agent that owns a particular project or
-area of responsibility. People paper over this by copy-pasting between windows
-or injecting keystrokes into other terminals — fragile, manual, and impossible
-to build on.
+Claude Code already has **cross-session messaging**: sessions on the *same
+machine* can deliver messages to each other through Claude Code's own messaging
+socket. But that stops at the edge of one machine. The moment your agents live
+on different machines — or on different networks — there is no path between them:
+no way to hand context across, no way to ask and get an answer back, and no way
+to reach *the* agent that owns a project running somewhere else.
 
-`agents-msger` turns that into one clean channel.
+**`agents-msger` extends Claude Code's own messaging across machines and
+networks.** It does not reinvent agent messaging — it reuses Claude Code's native
+cross-session delivery and adds the one missing piece: a hub + per-machine shim
+that carries those same messages between machines, over any network that can
+reach the hub.
 
 ## What it does
 
@@ -66,14 +71,16 @@ Start the hub, start a shim, and ask the hub who is reachable:
 
 ![Running the hub and shim, then relay_who](docs/demo-run.svg)
 
-Then hand context to the agent responsible for a project — on another machine —
-and watch it arrive in that agent's session, with the sender's identity attached
+Then, from a machine on a different network, hand context to the agent
+responsible for a project — and see how Claude Code surfaces it in that agent's
+session, as a `Message from @…` turn, with the sender's identity attached
 automatically:
 
-![Reaching the responsible agent and handing off context](docs/demo-send.svg)
+![Reaching the responsible agent across networks, as Claude Code shows it](docs/demo-send.svg)
 
-> The transcripts above are a real end-to-end run (hub + shim + a receiving
-> session) with placeholder names.
+> These come from a real end-to-end run (hub + shim + delivery) captured in an
+> isolated test, with placeholder names and machines. The second panel is how
+> Claude Code renders a received cross-session message.
 
 ## Supported agents
 
@@ -131,9 +138,12 @@ on `machine-b`:
 5. **Long-poll delivery.** `machine-b`'s shim is holding an open long-poll to the
    hub; the queued message returns immediately. The shim resolves that owner's
    socket **locally** (it never trusts a socket path from the network) and writes
-   a `<cross-session-message>` envelope into it.
-6. **Arrival.** The message appears in the owner's agent session on its next
-   turn, showing exactly who sent it.
+   a Claude Code cross-session message into **the socket Claude Code itself
+   opened** for that session — in Claude Code's own native payload format. The
+   shim does not create sockets or implement messaging; it hands Claude Code's
+   own mechanism a message that happens to have come from another machine.
+6. **Arrival.** Claude Code renders it in the owner's session on its next turn as
+   a `Message from @<sender>` line, showing exactly who sent it.
 7. **Reply routing.** When the owner replies, the same path runs in reverse, and
    the answer lands back in agent A's window — automatically.
 
@@ -142,22 +152,39 @@ agent's machine is down" from "wrong address", and a session whose process is
 alive but whose socket went missing (e.g. just after a reboot) is surfaced
 explicitly rather than silently dropped.
 
-It is **dependency-free** (Python standard library only) and intentionally
-small: a hub, a shim, and an installer.
+The hub and shim add **no third-party Python dependencies** (standard library
+only) and are intentionally small — a hub, a shim, and an installer. Their one
+real dependency is **Claude Code itself** (see [Requirements](#requirements)).
 
 ## Requirements
 
-- Python 3.8+ (standard library only).
-- **Claude Code** on every participating machine. `agents-msger` currently
-  builds on two Claude Code implementation details (not yet a stable public
-  API, so behavior may change between versions):
-  1. The per-session messaging socket each interactive session listens on
-     (`/tmp/cc-socks/<pid>.sock` on macOS; `$XDG_RUNTIME_DIR/cc-socks/<pid>.sock`
-     on Linux).
-  2. The session registry Claude Code writes under `$CLAUDE_CONFIG_DIR/sessions`
-     (and/or `~/.claude/sessions`).
-- A receiving session must have **`crossSessionInbound: "accept"`** in its
-  settings so inbound messages are delivered rather than held.
+- Python 3.8+ — **standard library only**, no third-party packages. The hub and
+  shim run on a stock `python3`.
+- **Claude Code on every participating machine — this is the real dependency.**
+  `agents-msger` does not implement messaging; it rides on Claude Code's own
+  cross-session messaging, which means it relies on Claude Code internals that
+  are **not a stable public API** and may change between Claude Code versions:
+  1. **The messaging socket — created by Claude Code, not by this tool.** Each
+     interactive Claude Code session opens and listens on a Unix-domain socket at
+     `/tmp/cc-socks/<pid>.sock` (macOS) or `$XDG_RUNTIME_DIR/cc-socks/<pid>.sock`
+     (Linux, e.g. `/run/user/<uid>/…` — tmpfs, so it is cleared on reboot). The
+     shim only *connects* to it to deliver.
+  2. **The session registry — also written by Claude Code.** Claude Code writes a
+     `<pid>.json` record per session under `$CLAUDE_CONFIG_DIR/sessions` (and/or
+     `~/.claude/sessions`); the shim reads it to discover live sessions
+     (`pid`, `messagingSocketPath`, `cwd`, `name`, `sessionId`, `startedAt`,
+     `kind`, `runtime`).
+  3. **The native message format.** The shim writes the exact payload Claude Code
+     expects on that socket (a `type: "user"` message carrying a
+     `<cross-session-message>` envelope, `priority: "next"`), so Claude Code
+     surfaces it as a `Message from @<sender>` turn.
+- **`crossSessionInbound: "accept"`** must be set in a receiving session's
+  settings; otherwise Claude Code holds cross-session input instead of delivering
+  it.
+
+> Not to be confused with a separate helper that merely links session-registry
+> directories to make sessions addressable — `agents-msger` is the cross-machine
+> transport layer, and the socket/registry themselves are Claude Code's.
 
 ## Getting started
 
