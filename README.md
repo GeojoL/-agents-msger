@@ -55,6 +55,26 @@ The sender only says *who to reach*. Which machine, window, and process the
 message came from is attached automatically, so the receiver always knows who is
 talking to it — independent of the message content.
 
+Together these make `agents-msger` a substrate for **multi-agent
+orchestration**: an orchestrator agent can discover who is live (`relay_who`),
+delegate a task to the agent that owns a given project, collect the reply, and
+coordinate work across machines — all through three tools, no bespoke plumbing.
+
+## See it in action
+
+Start the hub, start a shim, and ask the hub who is reachable:
+
+![Running the hub and shim, then relay_who](docs/demo-run.svg)
+
+Then hand context to the agent responsible for a project — on another machine —
+and watch it arrive in that agent's session, with the sender's identity attached
+automatically:
+
+![Reaching the responsible agent and handing off context](docs/demo-send.svg)
+
+> The transcripts above are a real end-to-end run (hub + shim + a receiving
+> session) with placeholder names.
+
 ## Supported agents
 
 | Agent runtime | Status |
@@ -90,12 +110,37 @@ your hub (LAN, Tailscale/VPN overlay, or the public internet) can take part.
                            └───────────────┘
 ```
 
-- **Send** → local shim forwards to the hub → the hub resolves the target and
-  queues it for that machine.
-- **Deliver** → the target machine's shim long-polls the hub, resolves the
-  responsible agent's session locally, and hands the message in.
-- **Heartbeat** → every few seconds each shim reports who is live, so the hub
-  always knows which agents are reachable right now.
+Step by step, when agent A on `machine-a` messages the agent that owns a project
+on `machine-b`:
+
+1. **Discovery (no config).** On each machine the shim scans the local agent
+   session registry and learns every live session: its owner persona (derived
+   from the session's working directory), its process id, and the messaging
+   socket it listens on. Nothing is hand-configured.
+2. **Heartbeat.** Every few seconds each shim sends that list to the hub, so the
+   hub holds a fresh, authoritative picture of which agents are reachable *right
+   now* — and marks a session not-alive the moment it stops appearing.
+3. **Send.** Agent A calls `relay_send(to="owner@machine-b", …)`. Its local shim
+   attaches the sender's identity automatically — machine, tmux window, and pid,
+   recovered by walking its own process tree — and POSTs the message to the hub.
+   The agent supplied only *who to reach*.
+4. **Routing & resolution.** The hub looks up `owner` on `machine-b`. If that
+   owner has one live session, it wins; if several, the newest — or the exact one
+   named with `#session`. If the owner has **no** live session, the call fails
+   loudly (`ok:false`), never a silent "queued".
+5. **Long-poll delivery.** `machine-b`'s shim is holding an open long-poll to the
+   hub; the queued message returns immediately. The shim resolves that owner's
+   socket **locally** (it never trusts a socket path from the network) and writes
+   a `<cross-session-message>` envelope into it.
+6. **Arrival.** The message appears in the owner's agent session on its next
+   turn, showing exactly who sent it.
+7. **Reply routing.** When the owner replies, the same path runs in reverse, and
+   the answer lands back in agent A's window — automatically.
+
+Two liveness signals keep this honest: `relay_status()` distinguishes "that
+agent's machine is down" from "wrong address", and a session whose process is
+alive but whose socket went missing (e.g. just after a reboot) is surfaced
+explicitly rather than silently dropped.
 
 It is **dependency-free** (Python standard library only) and intentionally
 small: a hub, a shim, and an installer.
@@ -188,5 +233,8 @@ and run the tests in `tests/` (`python3 tests/test_c1_identity.py`).
 ---
 
 <div align="center">
-<sub>Keywords: MCP · Model Context Protocol · AI agents · multi-agent · agent-to-agent · shared context · cross-machine · messaging · Claude Code · CLI</sub>
+<sub>Keywords: MCP · Model Context Protocol · AI agents · agent orchestration ·
+multi-agent orchestration · orchestrator · AI agent coordination · multi-agent ·
+agent-to-agent · agent communication · shared context · context hand-off ·
+cross-machine · cross-network · messaging · Claude Code · CLI</sub>
 </div>
