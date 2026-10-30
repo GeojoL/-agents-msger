@@ -12,9 +12,9 @@ its own live sessions. You only call the tools.
 ## The three tools
 
 - `relay_send(to, message, from_name?)` — send a message.
-  - `to = "alice"` sends to **alice on the local machine**.
-  - `to = "alice@host-b"` sends to alice on the machine **host-b** (cross-machine).
-  - `to = "alice@host-b#alice-c7"` — when a persona has several live sessions,
+  - `to = "<persona>"` sends to **that persona on the local machine**.
+  - `to = "<persona>@<host>"` sends to that persona on the machine **<host>** (cross-machine).
+  - `to = "<persona>@<host>#<session>"` — when a persona has several live sessions,
     use the `#` suffix to pick one (matches the per-session handle from
     `relay_who`: its `name`, `pid`, or a `sessionId` prefix).
   - The sender **only fills `to` and the body**. Your tmux window, agent name,

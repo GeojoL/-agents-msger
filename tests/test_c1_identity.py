@@ -1,20 +1,5 @@
 #!/usr/bin/env python3
-"""C1 identity-addressing local test (no live hub/shim touched).
-
-Covers the locked design end-to-end:
-  1. two sessions sharing a persona (two agents/alice, different pids) are BOTH
-     reported by live_sessions() (never collapsed) and BOTH show in the hub /who;
-  2. each can receive a message, and the two sockets each get their own;
-  3. `#match` routes to the correct specific socket (name/pid/session_id);
-  4. a dead/absent target -> relay_send's caller sees ok=false, NOT a false
-     queued=1 (fail loud);
-  5. a bare alias with several sessions resolves to the newest (soft label),
-     and still succeeds;
-  6. the /ack round-trip: an ack-capable shim posts delivered/error and the
-     /send reply reflects it; an old (non-ack) shim still gets ok/target_alive.
-
-Run:  python3 tests/test_c1_identity.py        (prints PASS/FAIL lines, exit 0/1)
-"""
+"""Identity addressing: same-persona sessions, #match routing, fail-loud sends and acks."""
 from __future__ import annotations
 
 import json
@@ -38,6 +23,28 @@ import shim as shim_mod       # noqa: E402
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
+
+class _FakeAgentsRoot:
+    """Context manager: make the shim see `agents_abs` as the agents root and clear the
+    60s root cache so the fake root takes effect at once. Fixture only."""
+
+    def __init__(self, agents_abs: str = "/fake/agents"):
+        self.agents_abs = agents_abs
+
+    def __enter__(self):
+        self._saved_read = shim_mod._read_agents_root
+        self._saved_cache = dict(shim_mod._AGENTS_ROOT_CACHE)
+        root = pathlib.Path(self.agents_abs)
+        shim_mod._read_agents_root = lambda: root
+        shim_mod._AGENTS_ROOT_CACHE.update({"ts": 0.0, "data": None, "last_good": None})
+        return self
+
+    def __exit__(self, *exc):
+        shim_mod._read_agents_root = self._saved_read
+        shim_mod._AGENTS_ROOT_CACHE.clear()
+        shim_mod._AGENTS_ROOT_CACHE.update(self._saved_cache)
+        return False
+
 
 class FakeUDS:
     """Bind a UDS at `path`; accept up to `n` native messages, store contents.
@@ -103,7 +110,7 @@ def make_shim_home(reg_persona_a: str, reg_persona_b: str, dead_persona: str,
     regdir.mkdir(parents=True)
     socks = {}
     for pid, (persona, name, sock_exists, started, sid) in live_pids.items():
-        sockpath = str(home / "cc-socks" / f"{pid}.sock")
+        sockpath = str(home / "example-socks" / f"{pid}.sock")
         pathlib.Path(sockpath).parent.mkdir(parents=True, exist_ok=True)
         # the file existing is what makes the session 'live' for the shim scan
         if sock_exists:
@@ -160,11 +167,14 @@ def check(label: str, cond: bool, detail: str = ""):
 
 
 # --------------------------------------------------------------------------
-# Test 1: two same-persona sessions both reported + both receive + #match
+# Case 1: two sessions for one persona are both reported, both receive, and #match selects one
 # --------------------------------------------------------------------------
 def test_same_persona_reporting_and_routing():
-    # Two 'alice' sessions: pids 1111 (alice-c7, older) and 2222 (alice-ea, newer).
-    # Plus one 'bob' session pid 3333. Plus a DEAD alice (socket gone) pid 4444.
+    with _FakeAgentsRoot("/fake/agents"):
+        _run_same_persona_body()
+
+
+def _run_same_persona_body():
     home = pathlib.Path(tempfile.mkdtemp(prefix="c1-home-"))
     # _reg_dirs() on these machines lists <home>/.claude/sessions first — write
     # the fake session files where the shim will actually scan them.
@@ -179,24 +189,24 @@ def test_same_persona_reporting_and_routing():
             rec["runtime"] = runtime
         (regdir / f"{pid}.json").write_text(json.dumps(rec))
 
-    base = home / "cc-socks"
+    base = home / "example-socks"
     base.mkdir()
-    s_alice1 = str(base / "1111.sock"); open(s_alice1, "a").close()
-    s_alice2 = str(base / "2222.sock"); open(s_alice2, "a").close()
-    s_bob = str(base / "3333.sock"); open(s_bob, "a").close()
-    # s_alicedead (4444): reg file exists but the socket file is NOT created, so
+    s_sock_1 = str(base / "1111.sock"); open(s_sock_1, "a").close()
+    s_sock_2 = str(base / "2222.sock"); open(s_sock_2, "a").close()
+    s_sock_3 = str(base / "3333.sock"); open(s_sock_3, "a").close()
+    # s_freddead (4444): reg file exists but the socket file is NOT created, so
     # the session is pid-alive-but-socket-missing -> surfaces as degraded.
 
-    reg(1111, "alice", "alice-c7", "sid-alice1", 1000, sock=s_alice1)
-    reg(2222, "alice", "alice-ea", "sid-alice2", 2000, sock=s_alice2)   # newer
-    reg(3333, "bob", "bob-32", "sid-bob", 1500, sock=s_bob)
-    reg(4444, "alice", "alice-dead", "sid-alicedead", 500,
+    reg(1111, "test_user_3", "test_user_3-c7", "sid-test_user_4", 1000, sock=s_sock_1)
+    reg(2222, "test_user_3", "test_user_3-ea", "sid-test_user_5", 2000, sock=s_sock_2)   # newer
+    reg(3333, "test_agent_2", "test_agent_2-32", "sid-test_agent_2", 1500, sock=s_sock_3)
+    reg(4444, "test_user_3", "test_user_3-dead", "sid-freddead", 500,
         sock=str(base / "4444.sock"))  # socket path referenced, but never created
 
     old_home = os.environ.get("HOME")
     os.environ["HOME"] = str(home)
     os.environ.pop("CLAUDE_CONFIG_DIR", None)
-    cfg = home / "config.json"; cfg.write_text(json.dumps({"host": "host-a"}))
+    cfg = home / "config.json"; cfg.write_text(json.dumps({"host": "test_host_1"}))
     os.environ["MCP_MSGERS_CONFIG"] = str(cfg)
 
     try:
@@ -212,56 +222,52 @@ def test_same_persona_reporting_and_routing():
             shim_mod._alive = orig_alive
 
         pids = {s["pid"] for s in sess}
-        check("1a two alice sessions both reported (not collapsed)",
+        check("1a two test_user_3 sessions both reported (not collapsed)",
               1111 in pids and 2222 in pids, f"pids={pids}")
-        check("1b dead alice (socket gone) is NOT live", 4444 not in pids,
+        check("1b dead test_user_3 (socket gone) is NOT live", 4444 not in pids,
               f"pids={pids}")
-        check("1c bob reported", 3333 in pids, f"pids={pids}")
+        check("1c test_agent_2 reported", 3333 in pids, f"pids={pids}")
 
-        # persona is a soft label: both alice sessions carry persona 'alice'
-        alice_sess = [s for s in sess if s["persona"] == "alice"]
-        check("1d both alice sessions carry persona 'alice'",
-              {s["pid"] for s in alice_sess} == {1111, 2222},
+        test_user_3_sess = [s for s in sess if s["persona"] == "test_user_3"]
+        check("1d both test_user_3 sessions carry persona 'test_user_3'",
+              {s["pid"] for s in test_user_3_sess} == {1111, 2222},
               f"{[ (s['pid'],s['persona']) for s in sess ]}")
 
-        # degraded: the socket-missing alice should surface as degraded (not live)
-        check("1e dead alice surfaces as degraded",
+        check("1e dead test_user_3 surfaces as degraded",
               any(d.get("pid") == 4444 for d in deg),
               f"degraded={[d.get('pid') for d in deg]}")
 
-        # routing: bare 'alice' -> newest (2222); #match name -> specific
         shim_mod._alive = lambda pid: pid in alive_pids
         try:
-            s_bare = shim_mod.local_socket_for("alice")
-            s_c7 = shim_mod.local_socket_for("alice", "alice-c7")
-            s_by_pid = shim_mod.local_socket_for("alice", "2222")
-            s_by_sid = shim_mod.local_socket_for("alice", "sid-alice2")
-            s_bad = shim_mod.local_socket_for("alice", "does-not-exist")
+            s_bare = shim_mod.local_socket_for("test_user_3")
+            s_c7 = shim_mod.local_socket_for("test_user_3", "test_user_3-c7")
+            s_by_pid = shim_mod.local_socket_for("test_user_3", "2222")
+            s_by_sid = shim_mod.local_socket_for("test_user_3", "sid-test_user_5")
+            s_bad = shim_mod.local_socket_for("test_user_3", "does-not-exist")
         finally:
             shim_mod._alive = orig_alive
 
-        check("2a bare 'alice' resolves to NEWEST (2222)", s_bare == s_alice2,
+        check("2a bare 'test_user_3' resolves to NEWEST (2222)", s_bare == s_sock_2,
               f"got={s_bare}")
-        check("3a #match by name routes to alice-c7's socket", s_c7 == s_alice1,
+        check("3a #match by name routes to test_user_3-c7's socket", s_c7 == s_sock_1,
               f"got={s_c7}")
-        check("3b #match by pid routes to 2222's socket", s_by_pid == s_alice2,
+        check("3b #match by pid routes to 2222's socket", s_by_pid == s_sock_2,
               f"got={s_by_pid}")
-        check("3c #match by session_id prefix routes correctly", s_by_sid == s_alice2,
+        check("3c #match by session_id prefix routes correctly", s_by_sid == s_sock_2,
               f"got={s_by_sid}")
         check("3d #match that hits nothing -> None (fail loud, not a guess)",
               s_bad is None, f"got={s_bad}")
 
-        # delivery: real native_send into two alice sockets -> each gets its own
-        f1 = FakeUDS(s_alice1, n=2)
-        f2 = FakeUDS(s_alice2, n=2)
+        f1 = FakeUDS(s_sock_1, n=2)
+        f2 = FakeUDS(s_sock_2, n=2)
         time.sleep(0.2)
-        shim_mod.native_send(s_alice1, "bob@host-a", "MSG_TO_C7")
-        shim_mod.native_send(s_alice2, "bob@host-a", "MSG_TO_EA")
+        shim_mod.native_send(s_sock_1, "test_agent_3", "MSG_TO_C7")
+        shim_mod.native_send(s_sock_2, "test_agent_3", "MSG_TO_EA")
         time.sleep(0.5)
-        check("4a alice-c7 socket received its message",
+        check("4a test_user_3-c7 socket received its message",
               any("MSG_TO_C7" in c for c in f1.received),
               f"f1={f1.received}")
-        check("4b alice-ea socket received its (distinct) message",
+        check("4b test_user_3-ea socket received its (distinct) message",
               any("MSG_TO_EA" in c for c in f2.received),
               f"f2={f2.received}")
         check("4c messages did not cross sockets",
@@ -273,141 +279,142 @@ def test_same_persona_reporting_and_routing():
 
 
 # --------------------------------------------------------------------------
-# Test 2: hub side — fail-loud /send, #match routing, /ack round-trip
+# Case 2: hub side: failing send, #match routing, and the ack round trip
 # --------------------------------------------------------------------------
 def test_hub_fail_loud_and_ack():
     h = hub_mod.Hub(poll_timeout=1)
 
-    # host 'host-a' has two live 'alice' sessions + reports ack cap.
-    h.heartbeat("host-a",
-                [{"pid": 1111, "persona": "alice", "name": "alice-c7",
+    h.heartbeat("test_host_1",
+                [{"pid": 1111, "persona": "test_user_3", "name": "test_user_3-c7",
                   "socket": "/tmp/1111.sock", "started": 1000,
-                  "session_id": "sid-alice1", "window": "w1"},
-                 {"pid": 2222, "persona": "alice", "name": "alice-ea",
+                  "session_id": "sid-test_user_4", "window": "w1"},
+                 {"pid": 2222, "persona": "test_user_3", "name": "test_user_3-ea",
                   "socket": "/tmp/2222.sock", "started": 2000,
-                  "session_id": "sid-alice2", "window": "w2"},
-                 {"pid": 3333, "persona": "bob", "name": "bob-32",
+                  "session_id": "sid-test_user_5", "window": "w2"},
+                 {"pid": 3333, "persona": "test_agent_2", "name": "test_agent_2-32",
                   "socket": "/tmp/3333.sock", "started": 1500,
-                  "session_id": "sid-bob", "window": "w3"}],
+                  "session_id": "sid-test_agent_2", "window": "w3"}],
                 degraded=[], facts={"tmux_active": True, "claude_procs": 3},
                 caps=["ack"])
 
-    # /who lists both alice sessions individually (not collapsed)
     who = h.who()
-    alice_list = who.get("host-a", {}).get("alice", [])
-    check("5a /who lists both alice sessions",
-          {e["pid"] for e in alice_list} == {1111, 2222},
-          f"alice={alice_list}")
+    test_user_3_list = who.get("test_host_1", {}).get("test_user_3", [])
+    check("5a /who lists both test_user_3 sessions",
+          {e["pid"] for e in test_user_3_list} == {1111, 2222},
+          f"test_user_3={test_user_3_list}")
     check("5b /who newest-first ordering (2222 before 1111)",
-          alice_list and alice_list[0]["pid"] == 2222,
-          f"alice={alice_list}")
+          test_user_3_list and test_user_3_list[0]["pid"] == 2222,
+          f"test_user_3={test_user_3_list}")
 
     # fail loud: send to an absent persona -> ok=false (no false queued)
-    r = h.send("bob", "bob@host-a", "host-a", "nobody", "hi")
+    r = h.send("test_agent_2", "test_agent_3", "test_host_1", "nobody", "hi")
     check("6a /send to absent persona -> ok=false", r["ok"] is False,
           f"{r}")
     check("6b absent-persona reply has NO queued=1 false success",
           "queued" not in r or r.get("queued", 0) == 0, f"{r}")
 
     # #match that hits nothing -> ok=false
-    r = h.send("bob", "bob@host-a", "host-a", "alice", "hi",
+    r = h.send("test_agent_2", "test_agent_3", "test_host_1", "test_user_3", "hi",
                extra={"to_match": "does-not-exist"})
     check("6c /send #match that hits nothing -> ok=false", r["ok"] is False,
           f"{r}")
 
-    # ack round-trip: sender /send to alice (bare -> newest 2222), the shim /acks
     # delivered. We simulate the shim actor: it /pops the outbox (via poll from
     # the target host), delivers, and posts /ack.
-    # start a thread acting as the target shim: poll host-a, then ack the mid.
     got_msg = {}
     def shim_actor():
         # drain the poll (blocking up to poll_timeout) to get the queued msg
         m = None
         deadline = time.time() + 3.0
         while time.time() < deadline and m is None:
-            m = h.poll("host-a")
+            m = h.poll("test_host_1")
         if m:
             got_msg["m"] = m
             # simulate successful delivery -> ack ok
-            h.ack("host-a", m["id"], True, "")
+            h.ack("test_host_1", m["id"], True, "")
     t = threading.Thread(target=shim_actor)
     t.start()
-    r = h.send("bob", "bob@host-a", "host-a", "alice", "hi")  # bare -> newest
+    r = h.send("test_agent_2", "test_agent_3", "test_host_1", "test_user_3", "hi")  # bare -> newest
     t.join(timeout=5)
     check("6d /send to ack-capable host returns delivered=true",
           r.get("delivered") is True, f"{r}")
     check("6e outbox msg carried the right to_persona",
-          got_msg.get("m", {}).get("to_persona") == "alice",
+          got_msg.get("m", {}).get("to_persona") == "test_user_3",
           f"{got_msg}")
 
     # #match routes the outbox message to the right session (to_match preserved)
     def shim_actor2():
         deadline = time.time() + 3.0
         while time.time() < deadline:
-            m = h.poll("host-a")
+            m = h.poll("test_host_1")
             if m:
                 got_msg["m2"] = m
-                h.ack("host-a", m["id"], True, "")
+                h.ack("test_host_1", m["id"], True, "")
                 return
         got_msg["m2"] = None
     t2 = threading.Thread(target=shim_actor2)
     t2.start()
-    r2 = h.send("bob", "bob@host-a", "host-a", "alice", "hi",
-                extra={"to_match": "alice-c7"})
+    r2 = h.send("test_agent_2", "test_agent_3", "test_host_1", "test_user_3", "hi",
+                extra={"to_match": "test_user_3-c7"})
     t2.join(timeout=5)
     check("6f /send #match ok=true and outbox kept to_match",
-          r2.get("ok") is True and got_msg.get("m2", {}).get("to_match") == "alice-c7",
+          r2.get("ok") is True and got_msg.get("m2", {}).get("to_match") == "test_user_3-c7",
           f"r2={r2} m2={got_msg.get('m2')}")
 
     # ack ERROR round-trip: target shim reports socket error -> /send ok=false
     def shim_actor3():
         deadline = time.time() + 3.0
         while time.time() < deadline:
-            m = h.poll("host-a")
+            m = h.poll("test_host_1")
             if m:
                 got_msg["m3"] = m
-                h.ack("host-a", m["id"], False, "socket error: broken pipe")
+                h.ack("test_host_1", m["id"], False, "socket error: broken pipe")
                 return
     t3 = threading.Thread(target=shim_actor3)
     t3.start()
-    r3 = h.send("bob", "bob@host-a", "host-a", "bob", "hi")  # bob pid 3333 live
+    r3 = h.send("test_agent_2", "test_agent_3", "test_host_1", "test_agent_2", "hi")
     t3.join(timeout=5)
     check("6g /send with a shim-reported socket error -> ok=false (fail loud)",
           r3.get("ok") is False and "error" in r3, f"{r3}")
 
-    # old (non-ack) host: no caps -> /send returns ok/target_alive, does not wait
-    h.heartbeat("host-b",
-                [{"pid": 5555, "persona": "alice", "name": "alice-dj",
+    # ok:true/target_alive — that was the "silent success" shape that masked
+    # 10/23's 04:27:31Z E1 loss. It must come back ok:false + delivered:false,
+    # fast (no long wait), with the reason explicit.
+    h.heartbeat("test_host_3",
+                [{"pid": 5555, "persona": "test_user_3", "name": "test_user_3-dj",
                   "socket": "/tmp/5555.sock", "started": 900,
                   "session_id": "sid-dj", "window": None}],
                 degraded=[], facts={}, caps=[])
     t0 = time.time()
-    r4 = h.send("bob", "bob@host-a", "host-b", "alice", "hi")
+    r4 = h.send("test_agent_2", "test_agent_3", "test_host_3", "test_user_3", "hi")
     dt = time.time() - t0
-    check("6h non-ack host -> ok + target_alive, no long wait",
-          r4.get("ok") is True and r4.get("target_alive") is True and dt < 1.0,
+    check("6h non-ack host -> ok:false delivered:false, fast",
+          r4.get("ok") is False and r4.get("delivered") is False
+          and r4.get("status") == "unconfirmed" and dt < 1.0,
           f"{r4} dt={dt:.2f}")
 
     # absent persona on non-ack host still fails loud (resolution is pre-ack)
-    r5 = h.send("bob", "bob@host-a", "host-b", "ghost", "hi")
+    r5 = h.send("test_agent_2", "test_agent_3", "test_host_3", "ghost", "hi")
     check("6i absent persona on non-ack host -> ok=false", r5["ok"] is False,
           f"{r5}")
 
 
 def test_background_jobs_are_never_routed():
-    # host-a 2026-01-01: a Claude Code background job (kind "bg", hosted by
-    # `claude bg-spare`) ran in agents/dave, registered as a 'dave' session
-    # and took messages meant for dave's interactive window (delivered:true,
+    with _FakeAgentsRoot("/fake/agents"):
+        _run_bg_jobs_body()
+
+
+def _run_bg_jobs_body():
     # silently to the wrong session).
     home = pathlib.Path(tempfile.mkdtemp(prefix="c1-bg-"))
     regdir = home / ".claude" / "sessions"
     regdir.mkdir(parents=True)
-    base = home / "cc-socks"
+    base = home / "example-socks"
     base.mkdir()
 
     def reg(pid, name, started, kind):
         sock = str(base / f"{pid}.sock"); open(sock, "a").close()
-        rec = {"pid": pid, "sessionId": f"sid-{pid}", "cwd": "/fake/agents/dave",
+        rec = {"pid": pid, "sessionId": f"sid-{pid}", "cwd": "/fake/agents/test_agent_4",
                "startedAt": started, "messagingSocketPath": sock, "name": name,
                "status": "idle"}
         if kind is not None:
@@ -415,13 +422,13 @@ def test_background_jobs_are_never_routed():
         (regdir / f"{pid}.json").write_text(json.dumps(rec))
         return sock
 
-    s_live = reg(5211, "dave-71", 1000, "interactive")
-    s_bg = reg(8951, "example background job", 2000, "bg")    # NEWER than dave-71
-    s_old = reg(4100, "dave-legacy", 500, None)                  # pre-kind record
+    s_live = reg(5211, "test_agent_4-71", 1000, "interactive")
+    s_bg = reg(8951, "example session", 2000, "bg")
+    s_old = reg(4100, "test_agent_4-legacy", 500, None)                  # pre-kind record
     old_home = os.environ.get("HOME")
     os.environ["HOME"] = str(home)
     os.environ.pop("CLAUDE_CONFIG_DIR", None)
-    cfg = home / "config.json"; cfg.write_text(json.dumps({"host": "host-a"}))
+    cfg = home / "config.json"; cfg.write_text(json.dumps({"host": "test_host_1"}))
     os.environ["MCP_MSGERS_CONFIG"] = str(cfg)
     orig_alive = shim_mod._alive
     shim_mod._alive = lambda pid: pid in (5211, 8951, 4100)
@@ -431,10 +438,10 @@ def test_background_jobs_are_never_routed():
         check("7b interactive and pre-kind sessions stay routable",
               {5211, 4100} <= sess, f"{sess}")
         check("7c bare persona picks the interactive session even when a bg job is newer",
-              shim_mod.local_socket_for("dave") == s_live,
-              f"{shim_mod.local_socket_for('dave')}")
+              shim_mod.local_socket_for("test_agent_4") == s_live,
+              f"{shim_mod.local_socket_for('test_agent_4')}")
         check("7d #match on the bg job's name never resolves to it",
-              shim_mod.local_socket_for("dave", "example background job") != s_bg)
+              shim_mod.local_socket_for("test_agent_4", "example session") != s_bg)
         unr = shim_mod.unroutable_sessions()
         check("7e bg job is reported as unroutable with its kind",
               [(u["pid"], u["kind"]) for u in unr] == [(8951, "bg")], f"{unr}")
@@ -449,31 +456,98 @@ def test_background_jobs_are_never_routed():
         os.environ.pop("MCP_MSGERS_CONFIG", None)
 
     h = hub_mod.Hub(poll_timeout=1)
-    h.heartbeat("host-a",
-                [{"pid": 5211, "persona": "dave", "name": "dave-71",
+    h.heartbeat("test_host_1",
+                [{"pid": 5211, "persona": "test_agent_4", "name": "test_agent_4-71",
                   "socket": s_live, "started": 1000, "session_id": "sid-5211"}],
                 degraded=[], facts={}, caps=[],
-                unroutable=[{"pid": 8951, "persona": "dave",
-                             "name": "example background job", "kind": "bg"}])
-    who = h.who()["host-a"]["dave"]
+                unroutable=[{"pid": 8951, "persona": "test_agent_4",
+                             "name": "example session", "kind": "bg"}])
+    who = h.who()["test_host_1"]["test_agent_4"]
     bg = [e for e in who if e["pid"] == 8951]
     check("7g /who lists the bg job, flagged not addressable",
           len(bg) == 1 and bg[0]["addressable"] is False and bg[0]["kind"] == "bg", f"{who}")
-    r = h.send("erin", "erin@host-a", "host-a", "dave", "hi",
-               {"to_match": "example background job"})
+    r = h.send("test_agent_5", "test_agent_6", "test_host_1", "test_agent_4", "hi",
+               {"to_match": "example session"})
     check("7h sending to the bg job's name fails loud (ok=false)", r["ok"] is False, f"{r}")
-    r = h.send("erin", "erin@host-a", "host-a", "dave", "hi")
-    check("7i bare 'dave' still delivers to the interactive session",
-          r["ok"] is True and r["target_pid"] == 5211, f"{r}")
+    r = h.send("test_agent_5", "test_agent_6", "test_host_1", "test_agent_4", "hi")
+    # G2: a non-ack-capable host returns ok:false status:unconfirmed, but
+    # resolution still picked the right pid — assert the TARGET, not the
+    # legacy "ok" shape (every live host now carries the ack cap).
+    check("7i bare 'test_agent_4' still resolves to the interactive session",
+          r.get("to", {}).get("pid") == 5211, f"{r}")
     # an old shim that sends no 'unroutable' key keeps working
-    h.heartbeat("host-c", [], degraded=[], facts={}, caps=[])
-    check("7j heartbeat without 'unroutable' is accepted", "host-c" in h.who())
+    h.heartbeat("test_host_2", [], degraded=[], facts={}, caps=[])
+    check("7j heartbeat without 'unroutable' is accepted", "test_host_2" in h.who())
+
+
+def test_sender_header_is_the_registered_identity():
+    """Sender header is the registered identity."""
+    h = hub_mod.Hub(poll_timeout=1)
+    # Both hosts advertise ack; the fake actor below drains poll and sends acks.
+    h.heartbeat("test_host_2",
+                [{"pid": 4242, "persona": "test_agent_1", "name": "test_agent_1-9f",
+                  "socket": "/tmp/4242.sock", "started": 1000,
+                  "session_id": "sid-test_agent_1", "window": "test_agent_1"},
+                 {"pid": 5151, "persona": "test_user_2", "name": "test_user_2-02",
+                  "socket": "/tmp/5151.sock", "started": 1100,
+                  "session_id": "sid-test_user_2", "window": "test_user_2"}],
+                degraded=[], facts={}, caps=["ack"])
+    h.heartbeat("test_host_1",
+                [{"pid": 7777, "persona": "test_agent_5", "name": "test_user_6",
+                  "socket": "/tmp/7777.sock", "started": 1000,
+                  "session_id": "sid-test_agent_5", "window": "test_agent_5"}],
+                degraded=[], facts={}, caps=[])
+    # 8a: a wrong caller label is replaced by the registered identity on the
+    # outbox message. The /send return shape under G2 is no-cap-fast-fail;
+    # the assertion that matters here is the header on the popped message.
+    h.ACK_WAIT_S = 0.05
+    h.send("test_host_2", "test_host_2@test_host_2", "test_host_1", "test_agent_5", "hi", {"from_pid": 4242})
+    msg = h.poll("test_host_1")
+    check("8a header is the registered persona@host#name",
+          msg and msg["from_name"] == "test_agent_1@test_host_2#test_agent_1-9f", f"{msg}")
+    # 8b: a hand-written signature of another persona is ignored too
+    h.send("test_host_2", "test_agent_5@test_host_2", "test_host_1", "test_agent_5", "hi", {"from_pid": 5151})
+    msg = h.poll("test_host_1")
+    check("8b hand-written signature ignored", msg and msg["from_name"] == "test_user_2@test_host_2#test_user_2-02", f"{msg}")
+    # 8c: an unregistered sender (no pid in the registry) keeps the label it gave
+    h.send("test_host_4", "pi@test_host_4", "test_host_1", "test_agent_5", "hi", {"from_pid": 1})
+    msg = h.poll("test_host_1")
+    check("8c unregistered sender keeps its label", msg and msg["from_name"] == "pi@test_host_4", f"{msg}")
+
+    # shim side: self_identity() takes persona and session name from the live
+    # tree to the nearest known runtime, not just Claude). Env vars never participate.
+    rec = {"persona": "test_agent_1", "name": "test_agent_1-9f", "pid": os.getpid(), "socket": "/tmp/x", "session_id": "s", "started": 1}
+    saved = (shim_mod.live_sessions, shim_mod._find_runtime_pid, shim_mod.host_id, shim_mod._tmux_window)
+    try:
+        shim_mod.live_sessions = lambda: [rec]
+        shim_mod._find_runtime_pid = lambda start_pid=None: (os.getpid(), "claude")
+        shim_mod.host_id = lambda: "test_host_2"
+        shim_mod._tmux_window = lambda pid: None
+        ident = shim_mod.self_identity()
+        check("8d shim from_name is the registered identity",
+              ident["from_name"] == "test_agent_1@test_host_2#test_agent_1-9f" and ident["registered"] is True, f"{ident}")
+        shim_mod.live_sessions = lambda: []
+        ident = shim_mod.self_identity()
+        check("8e unregistered pid without a derivable persona → unknown",
+              ident["registered"] is False and ident["agent"] == "unknown"
+              and ident["from_name"] == "unknown@test_host_2", f"{ident}")
+        # never reads env for identity — removed as part of the launcher-identity revert.
+        os.environ["MCP_MSGERS_FROM"] = "webchat@test_host_2#conv-42"
+        shim_mod.live_sessions = lambda: [rec]
+        ident = shim_mod.self_identity()
+        check("8f MCP_MSGERS_FROM is ignored (env never participates)",
+              ident["from_name"] == "test_agent_1@test_host_2#test_agent_1-9f"
+              and ident["agent"] == "test_agent_1" and ident["session"] == "test_agent_1-9f", f"{ident}")
+    finally:
+        os.environ.pop("MCP_MSGERS_FROM", None)
+        (shim_mod.live_sessions, shim_mod._find_runtime_pid, shim_mod.host_id, shim_mod._tmux_window) = saved
 
 
 def main():
     test_same_persona_reporting_and_routing()
     test_hub_fail_loud_and_ack()
     test_background_jobs_are_never_routed()
+    test_sender_header_is_the_registered_identity()
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:
         print("FAILED:", *FAIL, sep="\n  ")

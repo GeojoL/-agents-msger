@@ -1,35 +1,23 @@
 #!/usr/bin/env python3
-"""mcp-msgers installer — idempotent, per-host.
+"""mcp-msgers installer: copy the shim into the per-user lib dir and write its config.
 
-  install --hub-url http://the-hub-host:8465 [--role hub|shim|both] [--host NAME]
+  install --hub-url http://hub.example.invalid:8465 [--host NAME] [--registry-dir DIR ...]
 
-For a 'hub' host (the-hub-host): install hub.py + supervisor (systemd).
-For a 'shim' host: install shim.py + a 'serve' worker under the supervisor.
-Machines with 'shim' role also get an MCP registration so their Claude agents
-pick up the relay_* tools.
-
-The supervisor is chosen by OS: systemd --user on Linux, launchd on macOS.
-Re-run any time to re-align.
+Idempotent, per host. Copies shim.py into ~/.local/libexec/mcp-msgers/ and writes
+~/.config/mcp-msgers/config.json. It writes no OS supervisor unit and does not register
+the MCP server with an agent client; the README describes both steps.
 """
 from __future__ import annotations
 
 import argparse
-import os
+import json
 import pathlib
-import platform
-import re
 import shutil
 import socket
-import subprocess
-import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 LIBDIR = pathlib.Path("~/.local/libexec/mcp-msgers").expanduser()
 CFGDIR = pathlib.Path("~/.config/mcp-msgers").expanduser()
-
-
-def run(cmd, **kw):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=60, **kw)
 
 
 def host_id(explicit: str | None) -> str:
@@ -38,124 +26,37 @@ def host_id(explicit: str | None) -> str:
     return socket.gethostname().split(".")[0]
 
 
-def is_mac():
-    return platform.system() == "Darwin"
-
-
-def install_files():
+def install_files() -> pathlib.Path:
     LIBDIR.mkdir(parents=True, exist_ok=True)
-    for f in ("hub.py", "shim.py"):
-        src = HERE / f
-        if src.exists():
-            shutil.copyfile(src, LIBDIR / f)
-    # keep a copy of the installer + config writer on the host for re-runs
+    shutil.copyfile(HERE / "shim.py", LIBDIR / "shim.py")
     shutil.copyfile(HERE / "install", LIBDIR / "install")
     return LIBDIR
 
 
-def write_config(host: str, hub_url: str, role: str, registry_dirs=None):
+def write_config(host: str, hub_url: str, registry_dirs=None) -> dict:
     CFGDIR.mkdir(parents=True, exist_ok=True)
-    import json
-    cfg = {"host": host, "hub_url": hub_url.rstrip("/"), "role": role}
+    cfg = {"host": host, "hub_url": hub_url.rstrip("/"), "role": "shim"}
     if registry_dirs:
         cfg["registry_dirs"] = registry_dirs
-    (CFGDIR / "config.json").write_text(json.dumps(cfg, indent=2))
+    (CFGDIR / "config.json").write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
     return cfg
 
 
-# ---------- systemd (Linux) --------------------------------------------------
-
-def systemd_units(role: str, host: str):
-    py = "/usr/bin/python3"
-    out = {}
-    exe = str(LIBDIR / "shim.py")
-    out["shim"] = (
-        f"[Unit]\nDescription=mcp-msgers shim ({host})\n"
-        f"After=network-online.target\n\n"
-        f"[Service]\nExecStart={py} {exe} serve\n"
-        f"Restart=always\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n"
-    )
-    if role in ("hub", "both"):
-        hexe = str(LIBDIR / "hub.py")
-        out["hub"] = (
-            f"[Unit]\nDescription=mcp-msgers hub ({host})\nAfter=network-online.target\n\n"
-            f"[Service]\nExecStart={py} {hexe} serve --port 8465\n"
-            f"Restart=always\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n"
-        )
-    return out
-
-
-def install_systemd(role: str, host: str) -> list[str]:
-    units = systemd_units(role, host)
-    userdir = pathlib.Path("~/.config/systemd/user").expanduser()
-    userdir.mkdir(parents=True, exist_ok=True)
-    log = []
-    for name, body in units.items():
-        ufile = userdir / f"mcp-msgers-{name}.service"
-        ufile.write_text(body)
-        for c in ("daemon-reload", "enable mcp-msgers-" + name, "restart mcp-msgers-" + name):
-            r = run(["systemctl", "--user", c])
-            log.append(f"systemctl --user {c}: rc={r.returncode} {r.stdout.strip() or r.stderr.strip()[:120]}")
-    return log
-
-
-# ---------- launchd (macOS) --------------------------------------------------
-
-def launchd_plist(label: str, prog_args: list[str]) -> str:
-    args = "\n".join(f"	<string>{a}</string>" for a in prog_args)
-    return f'''<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-	<key>Label</key><string>{label}</string>
-	<key>ProgramArguments</key><array>
-{args}
-	</array>
-	<key>RunAtLoad</key><true/>
-	<key>KeepAlive</key><true/>
-	<key>EnvironmentVariables</key><dict>
-		<key>MCP_MSGERS_CONFIG</key><string>{CFGDIR}/config.json</string>
-	</dict>
-</dict></plist>
-'''
-
-
-def install_launchd(role: str, host: str) -> list[str]:
-    log = []
-    la = pathlib.Path("~/Library/LaunchAgents").expanduser()
-    la.mkdir(parents=True, exist_ok=True)
-    uid = os.getuid()
-    py = sys.executable
-    plists = {}
-    plists["shim"] = launchd_plist(
-        "com.mcp-msgers.shim", [py, str(LIBDIR / "shim.py"), "serve"])
-    if role in ("hub", "both"):
-        plists["hub"] = launchd_plist(
-            "com.mcp-msgers.hub", [py, str(LIBDIR / "hub.py"), "serve", "--port", "8465"])
-    for name, body in plists.items():
-        pfile = la / f"com.mcp-msgers.{name}.plist"
-        pfile.write_text(body)
-        r = run(["launchctl", "bootout", f"gui/{uid}/com.mcp-msgers.{name}"])
-        r = run(["launchctl", "bootstrap", f"gui/{uid}", str(pfile)])
-        log.append(f"launchctl bootstrap com.mcp-msgers.{name}: rc={r.returncode} {r.stderr.strip()[:120]}")
-    return log
-
-
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--hub-url", required=True)
-    ap.add_argument("--role", choices=["hub", "shim", "both"], default="shim")
-    ap.add_argument("--host", default=None)
-    ap.add_argument("--registry-dir", action="append", default=None)
+    ap = argparse.ArgumentParser(description="Install the mcp-msgers shim for this user.")
+    ap.add_argument("--hub-url", required=True,
+                    help="hub base URL, for example http://hub.example.invalid:8465")
+    ap.add_argument("--host", default=None,
+                    help="name of this machine (default: the short host name)")
+    ap.add_argument("--registry-dir", action="append", default=None,
+                    help="extra session registry directory (repeatable)")
     args = ap.parse_args()
     host = host_id(args.host)
     lib = install_files()
-    cfg = write_config(host, args.hub_url, args.role, args.registry_dir)
-    log = [f"installed to {lib}", f"config host={host} hub_url={cfg['hub_url']} role={cfg['role']}"]
-    if is_mac():
-        log += install_launchd(args.role, host)
-    else:
-        log += install_systemd(args.role, host)
-    print("\n".join(log))
+    cfg = write_config(host, args.hub_url, args.registry_dir)
+    print(f"installed to {lib}")
+    print(f"config host={host} hub_url={cfg['hub_url']}")
+    print("note: supervisor units and the MCP registration are not written by this installer")
     return 0
 
 

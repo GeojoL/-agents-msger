@@ -1,0 +1,13 @@
+{
+  "host": "<this-machine-name>",
+  "hub_url": "http://hub.example.invalid:8465",
+  "hub_token_file": "~/.config/mcp-msgers/hub-token",
+  "agents_root": "~/agents",
+  "registry_dirs": [],
+  "extra_runtimes": [
+    ["example-harness", []]
+  ],
+  "webchat_dir": null,
+  "wake_command": null,
+  "envelope_from_mode": "bypass"
+}
